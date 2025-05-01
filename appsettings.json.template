@@ -1,0 +1,20 @@
+{
+  "BeakpointInsights": {
+    "API_KEY": "",
+    "OTEL_ENDPOINT": ""
+  },
+  "ConnectionStrings": {
+    "EC2": ""
+  },
+  "AWS": {
+    "Credentials": {
+      "AccessKeyId": "",
+      "SecretAccessKey": "",
+      "SessionToken": ""
+    },
+    "Region": ""
+  },
+  "EC2": {
+    "InstanceId": ""
+  }
+}
