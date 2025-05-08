@@ -172,18 +172,21 @@ public static class Program {
         }
         else
         {
-            foreach (var fleet in fleetResponse.Fleets)
+            if (fleetResponse.Fleets != null && fleetResponse.Fleets.Count == 0)
             {
-                var fleetInstancesRequest = new DescribeFleetInstancesRequest
+                foreach (var fleet in fleetResponse.Fleets)
                 {
-                    FleetId = fleet.FleetId
-                };
-                var fleetInstancesResponse = await client.DescribeFleetInstancesAsync(fleetInstancesRequest);
-                if (fleetInstancesResponse.ActiveInstances.Any(i => i.InstanceId == instance.InstanceId))
-                {
-                    fleetId = fleet.FleetId;
-                    memoryCache.Set(instance.InstanceId, fleetId, new MemoryCacheEntryOptions());
-                    break;
+                    var fleetInstancesRequest = new DescribeFleetInstancesRequest
+                    {
+                        FleetId = fleet.FleetId
+                    };
+                    var fleetInstancesResponse = await client.DescribeFleetInstancesAsync(fleetInstancesRequest);
+                    if (fleetInstancesResponse.ActiveInstances.Any(i => i.InstanceId == instance.InstanceId))
+                    {
+                        fleetId = fleet.FleetId;
+                        memoryCache.Set(instance.InstanceId, fleetId, new MemoryCacheEntryOptions());
+                        break;
+                    }
                 }
             }
         }
