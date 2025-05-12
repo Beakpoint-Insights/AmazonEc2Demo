@@ -14,7 +14,8 @@ using OpenTelemetry.Trace;
 
 namespace AmazonEc2Demo;
 
-public static class Program {
+public static class Program
+{
     public static void Main(string[] args) {
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
         // Create a path to configuration files
@@ -97,7 +98,7 @@ public static class Program {
     /// <param name="memoryCache">The memory cache object, used to store the
     /// fleet ID for the instance.</param>
     /// <returns>A dictionary of attributes that identify the instance.</returns>
-    static async Task<Dictionary<string, object>> GetAttributes(IConfiguration configuration, IMemoryCache memoryCache)
+    private static async Task<Dictionary<string, object>> GetAttributes(IConfiguration configuration, IMemoryCache memoryCache)
     {
         // Get AWS credentials
         var accessKey = configuration["AWS:Credentials:AccessKeyId"];
@@ -117,33 +118,33 @@ public static class Program {
         });
 
         // Describe instance request
-        if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId, out Instance? instance) || instance is null)
+        if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId + "_Instance", out Instance? instance) || instance is null)
         {
             instance = await DescribeInstancesApiCall(client, EC2InstanceMetadata.InstanceId);
-            memoryCache.Set(EC2InstanceMetadata.InstanceId, instance, new MemoryCacheEntryOptions());
+            memoryCache.Set(EC2InstanceMetadata.InstanceId + "_Instance", instance, new MemoryCacheEntryOptions());
         }
 
         // Clarify platform details request
-        if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId, out string? platformDetails) || platformDetails is null)
+        if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId + "_PlatformDetails", out string? platformDetails) || platformDetails is null)
         {
             platformDetails = await ClarifyPlatformDetailsAsync(client, instance.ImageId, memoryCache, instance.PlatformDetails);
-            memoryCache.Set(EC2InstanceMetadata.InstanceId, platformDetails, new MemoryCacheEntryOptions());
+            memoryCache.Set(EC2InstanceMetadata.InstanceId + "_PlatformDetails", platformDetails, new MemoryCacheEntryOptions());
         }
 
         // Describe capacity reservation request to ger capacity reservation preference
-        if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId, out string? capacityReservationPreference)
+        if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId + "_CapacityReservationPreference", out string? capacityReservationPreference)
             || string.IsNullOrEmpty(capacityReservationPreference))
         {
             capacityReservationPreference = await DescribeCapacityReservationsApiCall(client, instance);
-            memoryCache.Set(EC2InstanceMetadata.InstanceId, capacityReservationPreference, new MemoryCacheEntryOptions());
+            memoryCache.Set(EC2InstanceMetadata.InstanceId + "_CapacityReservationPreference", capacityReservationPreference, new MemoryCacheEntryOptions());
         }
 
         // Describe fleets request to get the fleet id
-        if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId, out string? fleetId)
+        if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId + "_FleetId", out string? fleetId)
             || string.IsNullOrEmpty(fleetId))
         {
             fleetId = await GetFleetIdApiCall(client, instance);
-            memoryCache.Set(EC2InstanceMetadata.InstanceId, fleetId, new MemoryCacheEntryOptions());
+            memoryCache.Set(EC2InstanceMetadata.InstanceId + "_FleetId", fleetId, new MemoryCacheEntryOptions());
         }
 
         return new Dictionary<string, object>
