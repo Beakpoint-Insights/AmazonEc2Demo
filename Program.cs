@@ -1,23 +1,23 @@
-using OpenTelemetry;
-using OpenTelemetry.Exporter;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
+// Beakpoint Insights, Inc. licenses this file to you under the MIT license.
+
+using System.Reflection;
 using Amazon;
 using Amazon.EC2;
 using Amazon.EC2.Model;
 using Amazon.Runtime;
-//using Amazon.LicenseManager;
-//using Amazon.LicenseManager.Model;
 using Amazon.Util;
-using System.Reflection;
 using Microsoft.Extensions.Caching.Memory;
+using OpenTelemetry;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
-namespace Ec2TraceGenerator;
+namespace AmazonEc2Demo;
 
 public static class Program {
     public static void Main(string[] args) {
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
-        // Create a path to congiguration files
+        // Create a path to configuration files
         var basePath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "";
         var projectPath = Path.GetFullPath(Path.Combine(basePath, Path.Combine("..", "..", "..")));
         
@@ -32,21 +32,20 @@ public static class Program {
 
         // Resolve IMemoryCache from the service provider
         #pragma warning disable ASP0000
-        var serviceProvider = builder.Services.BuildServiceProvider();
-        var memoryCache = serviceProvider.GetRequiredService<IMemoryCache>();
+        ServiceProvider serviceProvider = builder.Services.BuildServiceProvider();
+        IMemoryCache memoryCache = serviceProvider.GetRequiredService<IMemoryCache>();
 
         // Get Telemetry receiver address and API key
         var apiKey = builder.Configuration["Beakpoint:Otel:ApiKey"];
         var url = builder.Configuration["Beakpoint:Otel:Url"] ?? throw new InvalidOperationException("Beakpoint Otel Url is not configured");
 
         // Get instance metadata
-        var attributes = getAttributes(builder.Configuration, memoryCache).GetAwaiter().GetResult();
+        var attributes = GetAttributes(builder.Configuration, memoryCache).GetAwaiter().GetResult();
 
         // Add OpenTelemetry
         builder.Services.AddOpenTelemetry()
             .WithTracing(tracingBuilder => tracingBuilder
                 .SetResourceBuilder(ResourceBuilder.CreateDefault()
-                    //.AddService("Ec2TraceGenerator")
                     .AddAttributes(attributes))
                 .AddAspNetCoreInstrumentation(options => {
                     options.EnrichWithHttpRequest = (activity, request) => {
@@ -98,35 +97,29 @@ public static class Program {
     /// <param name="memoryCache">The memory cache object, used to store the
     /// fleet ID for the instance.</param>
     /// <returns>A dictionary of attributes that identify the instance.</returns>
-    static async Task<Dictionary<string, object>> getAttributes(IConfiguration configuration, IMemoryCache memoryCache)
+    static async Task<Dictionary<string, object>> GetAttributes(IConfiguration configuration, IMemoryCache memoryCache)
     {
         // Get AWS credentials
         var accessKey = configuration["AWS:Credentials:AccessKeyId"];
         var secretKey = configuration["AWS:Credentials:SecretAccessKey"];
         var sessionToken = configuration["AWS:Credentials:SessionToken"];
 
-        var regionName = EC2InstanceMetadata.AvailabilityZone.Substring(0, EC2InstanceMetadata.AvailabilityZone.Length - 1);
+        var regionName = EC2InstanceMetadata.AvailabilityZone[..^1];
 
-        var credentials = new SessionAWSCredentials(accessKey, secretKey, sessionToken);
+        SessionAWSCredentials credentials = new SessionAWSCredentials(accessKey, secretKey, sessionToken);
 
-        var region = RegionEndpoint.GetBySystemName(regionName);
+        RegionEndpoint? region = RegionEndpoint.GetBySystemName(regionName);
 
         // Initialize EC2 client
-        var client = new AmazonEC2Client(credentials, new AmazonEC2Config
+        AmazonEC2Client client = new AmazonEC2Client(credentials, new AmazonEC2Config
         {
             RegionEndpoint = region
         });
 
-        // Initialize License Manager client
-        //var licenseManagerClient = new AmazonLicenseManagerClient(credentials, new AmazonLicenseManagerConfig
-        //{
-        //    RegionEndpoint = region
-        //});
-
         // Describe instance request
         if (!memoryCache.TryGetValue(EC2InstanceMetadata.InstanceId, out Instance? instance) || instance is null)
         {
-            instance = await DescripeInstancesApiCall(client, EC2InstanceMetadata.InstanceId);
+            instance = await DescribeInstancesApiCall(client, EC2InstanceMetadata.InstanceId);
             memoryCache.Set(EC2InstanceMetadata.InstanceId, instance, new MemoryCacheEntryOptions());
         }
 
@@ -159,7 +152,7 @@ public static class Program {
             ["aws.ec2.instance_type"] = instance.InstanceType.Value,
             ["aws.region"] = regionName,
             ["aws.ec2.platform_details"] = platformDetails,
-            ["aws.ec2.license_model"] = instance.Licenses.Count == 0 ? "No License required" : "Bring your own license", // Though I'm very unsure of it
+            ["aws.ec2.license_model"] = instance.Licenses.Count == 0 ? "No License required" : "Bring your own license",
             ["aws.ec2.tenancy"] = instance.Placement.Tenancy.Value,
             ["aws.ec2.instance_lifecycle"] = instance.InstanceLifecycle.Value,
             ["aws.ec2.capacity_reservation_id"] = instance.CapacityReservationId,
@@ -168,13 +161,13 @@ public static class Program {
         };
     }
 
-    static async Task<Instance> DescripeInstancesApiCall(AmazonEC2Client client, string instanceId)
+    private static async Task<Instance> DescribeInstancesApiCall(AmazonEC2Client client, string instanceId)
     {
-        var request = string.IsNullOrWhiteSpace(EC2InstanceMetadata.InstanceId)
+        DescribeInstancesRequest request = string.IsNullOrWhiteSpace(EC2InstanceMetadata.InstanceId)
         ? new DescribeInstancesRequest()
-        : new DescribeInstancesRequest { InstanceIds = new List<string> { instanceId } };
+        : new DescribeInstancesRequest { InstanceIds = [instanceId] };
 
-        var response = await client.DescribeInstancesAsync(request);
+        DescribeInstancesResponse? response = await client.DescribeInstancesAsync(request);
 
         if (response.Reservations.Count == 0)
         {
@@ -188,17 +181,17 @@ public static class Program {
         return response.Reservations.First().Instances.First();
     }
 
-    static async Task<string> DescribeCapacityReservationsApiCall(AmazonEC2Client client, Instance instance)
+    private static async Task<string> DescribeCapacityReservationsApiCall(AmazonEC2Client client, Instance instance)
     {
         var capacityReservationPreference = "none";
 
         if (!string.IsNullOrEmpty(instance.CapacityReservationId))
         {
-            var capacityReservationRequest = new DescribeCapacityReservationsRequest
+            DescribeCapacityReservationsRequest capacityReservationRequest = new DescribeCapacityReservationsRequest
             {
-                CapacityReservationIds = new List<string> { instance.CapacityReservationId }
+                CapacityReservationIds = [instance.CapacityReservationId]
             };
-            var capacityReservationResponse = await client.DescribeCapacityReservationsAsync(capacityReservationRequest);
+            DescribeCapacityReservationsResponse? capacityReservationResponse = await client.DescribeCapacityReservationsAsync(capacityReservationRequest);
             if (capacityReservationResponse.CapacityReservations.Count > 0)
             {
                 // Assume preference based on reservation usage (simplified; "open" if available, "none" if not)
@@ -211,22 +204,22 @@ public static class Program {
         return capacityReservationPreference;
     }
 
-    static async Task<string> GetFleetIdApiCall(AmazonEC2Client client, Instance instance)
+    private static async Task<string> GetFleetIdApiCall(AmazonEC2Client client, Instance instance)
     {
         var fleetId = string.Empty;
 
-        var describeFleetsRequest = new DescribeFleetsRequest();
-        var fleetResponse = await client.DescribeFleetsAsync(describeFleetsRequest);
+        DescribeFleetsRequest describeFleetsRequest = new DescribeFleetsRequest();
+        DescribeFleetsResponse? fleetResponse = await client.DescribeFleetsAsync(describeFleetsRequest);
 
         if (fleetResponse.Fleets != null && fleetResponse.Fleets.Count == 0)
         {
-            foreach (var fleet in fleetResponse.Fleets)
+            foreach (FleetData? fleet in fleetResponse.Fleets)
             {
-                var fleetInstancesRequest = new DescribeFleetInstancesRequest
+                DescribeFleetInstancesRequest fleetInstancesRequest = new DescribeFleetInstancesRequest
                 {
                     FleetId = fleet.FleetId
                 };
-                var fleetInstancesResponse = await client.DescribeFleetInstancesAsync(fleetInstancesRequest);
+                DescribeFleetInstancesResponse? fleetInstancesResponse = await client.DescribeFleetInstancesAsync(fleetInstancesRequest);
                 if (fleetInstancesResponse.ActiveInstances.Any(i => i.InstanceId == instance.InstanceId))
                 {
                     fleetId = fleet.FleetId;
@@ -238,7 +231,7 @@ public static class Program {
         return fleetId;
     }
 
-    static async Task<string> ClarifyPlatformDetailsAsync(AmazonEC2Client client, string imageId, IMemoryCache memoryCache, string originalPlatformDetails)
+    private static async Task<string> ClarifyPlatformDetailsAsync(AmazonEC2Client client, string imageId, IMemoryCache memoryCache, string originalPlatformDetails)
     {
         string[] platformDetailsWithoutOs = 
         [
@@ -251,14 +244,14 @@ public static class Program {
         {
             if (!string.IsNullOrEmpty(imageId))
             {
-                var describeImagesRequest = new DescribeImagesRequest
+                DescribeImagesRequest describeImagesRequest = new DescribeImagesRequest
                 {
-                    ImageIds = new List<string> { imageId }
+                    ImageIds = [imageId]
                 };
-                var describeImagesResponse = await client.DescribeImagesAsync(describeImagesRequest);
+                DescribeImagesResponse? describeImagesResponse = await client.DescribeImagesAsync(describeImagesRequest);
                 if (describeImagesResponse.Images.Count > 0)
                 {
-                    var image = describeImagesResponse.Images[0];
+                    Image? image = describeImagesResponse.Images[0];
                     var name = image.Name?.ToLower() ?? "";
                     var description = image.Description?.ToLower() ?? "";
                     var imagePlatformDetails = image.PlatformDetails ?? originalPlatformDetails;
@@ -278,6 +271,6 @@ public static class Program {
                 }
             }
         }
-        return originalPlatformDetails; // Fallback if AMI lookup fails
+        return originalPlatformDetails;
     }
 }
