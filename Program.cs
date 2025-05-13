@@ -154,8 +154,7 @@ public static class Program {
             ["aws.ec2.instance_type"] = instance.InstanceType.Value,
             ["aws.region"] = regionName,
             ["aws.ec2.platform_details"] = platformDetails,
-            ["aws.ec2.license_model"] = instance.Licenses is null ? string.Empty : instance.Licenses,
-            //["aws.ec2.license_model"] = instance.Licenses is null || instance.Licenses.Count == 0 ? "No License required" : "Bring your own license",
+            ["aws.ec2.license_model"] = instance.Licenses is null || instance.Licenses.Count == 0 ? "No License required" : "Bring your own license",
             ["aws.ec2.tenancy"] = instance.Placement.Tenancy.Value
         };
 
