@@ -126,7 +126,7 @@ public static class Program {
         // Clarify platform details request
         if (!memoryCache.TryGetValue($"{EC2InstanceMetadata.InstanceId}_platformDetails", out string? platformDetails) || platformDetails is null)
         {
-            platformDetails = await ClarifyPlatformDetailsAsync(client, instance.ImageId, memoryCache, instance.PlatformDetails);
+            platformDetails = await ClarifyPlatformDetailsAsync(client, instance.ImageId, instance.PlatformDetails);
             memoryCache.Set($"{EC2InstanceMetadata.InstanceId}_platformDetails", platformDetails, new MemoryCacheEntryOptions());
         }
 
@@ -154,7 +154,8 @@ public static class Program {
             ["aws.ec2.instance_type"] = instance.InstanceType.Value,
             ["aws.region"] = regionName,
             ["aws.ec2.platform_details"] = platformDetails,
-            ["aws.ec2.license_model"] = instance.Licenses is null || instance.Licenses.Count == 0 ? "No License required" : "Bring your own license",
+            ["aws.ec2.license_model"] = instance.Licenses is null ? string.Empty : instance.Licenses,
+            //["aws.ec2.license_model"] = instance.Licenses is null || instance.Licenses.Count == 0 ? "No License required" : "Bring your own license",
             ["aws.ec2.tenancy"] = instance.Placement.Tenancy.Value
         };
 
@@ -209,7 +210,7 @@ public static class Program {
     /// <param name="memoryCache">The IMemoryCache to use for caching the response.</param>
     /// <param name="originalPlatformDetails">The original platform details as returned by the DescribeInstances API call.</param>
     /// <returns>The platform details with the OS included if it was not already included.</returns>
-    private static async Task<string> ClarifyPlatformDetailsAsync(AmazonEC2Client client, string imageId, IMemoryCache memoryCache, string originalPlatformDetails)
+    private static async Task<string> ClarifyPlatformDetailsAsync(AmazonEC2Client client, string imageId, string originalPlatformDetails)
     {
         string[] platformDetailsWithoutOs = 
         [
