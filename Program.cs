@@ -6,7 +6,6 @@ using Amazon.EC2;
 using Amazon.EC2.Model;
 using Amazon.Runtime;
 using Amazon.Util;
-using Microsoft.Extensions.Caching.Memory;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Resources;
@@ -28,19 +27,12 @@ public static class Program {
             .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true)
             .AddEnvironmentVariables();
 
-        builder.Services.AddMemoryCache();
-
-        // Resolve IMemoryCache from the service provider
-        #pragma warning disable ASP0000
-        ServiceProvider serviceProvider = builder.Services.BuildServiceProvider();
-        IMemoryCache memoryCache = serviceProvider.GetRequiredService<IMemoryCache>();
-
         // Get Telemetry receiver address and API key
         var apiKey = builder.Configuration["Beakpoint:Otel:ApiKey"];
         var url = builder.Configuration["Beakpoint:Otel:Url"] ?? throw new InvalidOperationException("Beakpoint Otel Url is not configured");
 
         // Get instance metadata
-        var attributes = GetAttributes(builder.Configuration, memoryCache).GetAwaiter().GetResult();
+        var attributes = GetAttributes(builder.Configuration).GetAwaiter().GetResult();
 
         // Add OpenTelemetry
         builder.Services.AddOpenTelemetry()
@@ -48,14 +40,14 @@ public static class Program {
                 .SetResourceBuilder(ResourceBuilder.CreateDefault()
                     .AddAttributes(attributes))
                 .AddAspNetCoreInstrumentation(options => {
-                    options.EnrichWithHttpRequest = (activity, request) => {
+                    options.EnrichWithHttpRequest = (activity, _) => {
                         foreach(var attr in attributes) {
                             activity.SetTag(attr.Key, attr.Value);
                         }
                     };
                 })
                 .AddHttpClientInstrumentation(options =>{
-                    options.EnrichWithHttpRequestMessage = (activity, request) => {
+                    options.EnrichWithHttpRequestMessage = (activity, _) => {
                         foreach(var attr in attributes) {
                             activity.SetTag(attr.Key, attr.Value);
                         }
@@ -87,17 +79,29 @@ public static class Program {
     }
 
     /// <summary>
-    /// Retrieves a dictionary of attributes that identify an EC2 instance,
-    /// including its ID, type, region, operating system, tenancy, and lifecycle.
-    /// The dictionary is meant to be used as the resource attributes for an OTel
-    /// span, so that it can be used to attribute costs to the instance.
+    /// Retrieves a dictionary of OpenTelemetry resource attributes that identify an EC2 instance.
+    /// These attributes follow OpenTelemetry semantic conventions where available, with custom
+    /// AWS-specific attributes for fields that have no semantic convention equivalent.
+    ///
+    /// Required attributes (must always be present):
+    /// - cloud.platform: Always "aws_ec2" for EC2 instances
+    /// - host.id: The EC2 instance ID
+    /// - host.type: The EC2 instance type (e.g., "c6i.large")
+    /// - cloud.region: The AWS region (e.g., "us-east-1")
+    /// - os.type: Either "linux" or "windows"
+    ///
+    /// Optional attributes (included when relevant):
+    /// - aws.ec2.platform_details: Only included for non-default platforms such as RHEL, SUSE, SQL Server, etc.
+    /// - aws.ec2.license_model: Included with comment explaining default behavior
+    /// - aws.ec2.tenancy: Included with comment explaining default behavior
+    /// - aws.ec2.instance_lifecycle: Only if instance is a spot instance
+    /// - aws.ec2.capacity_reservation_id: Only if instance uses a capacity reservation
+    /// - aws.ec2.capacity_reservation_preference: Only if capacity reservation is used
+    /// - aws.ec2.fleet_id: Only if instance belongs to a fleet
     /// </summary>
-    /// <param name="configuration">The configuration object, used to retrieve
-    /// AWS credentials and other configuration values.</param>
-    /// <param name="memoryCache">The memory cache object, used to store the
-    /// fleet ID for the instance.</param>
-    /// <returns>A dictionary of attributes that identify the instance.</returns>
-    static async Task<Dictionary<string, object>> GetAttributes(IConfiguration configuration, IMemoryCache memoryCache)
+    /// <param name="configuration">The configuration object, used to retrieve AWS credentials.</param>
+    /// <returns>A dictionary of attributes that identify the instance for cost attribution.</returns>
+    static async Task<Dictionary<string, object>> GetAttributes(IConfiguration configuration)
     {
         // Get AWS credentials
         var accessKey = configuration["AWS:Credentials:AccessKeyId"];
@@ -116,54 +120,60 @@ public static class Program {
             RegionEndpoint = region
         });
 
-        // Describe instance request
-        if (!memoryCache.TryGetValue($"{EC2InstanceMetadata.InstanceId}_instance", out Instance? instance) || instance is null)
-        {
-            instance = await DescribeInstancesApiCall(client, EC2InstanceMetadata.InstanceId);
-            memoryCache.Set($"{EC2InstanceMetadata.InstanceId}_instance", instance, new MemoryCacheEntryOptions());
-        }
+        // Fetch instance details from AWS
+        Instance instance = await DescribeInstancesApiCall(client, EC2InstanceMetadata.InstanceId);
 
-        // Clarify platform details request
-        if (!memoryCache.TryGetValue($"{EC2InstanceMetadata.InstanceId}_platformDetails", out string? platformDetails) || platformDetails is null)
-        {
-            platformDetails = await ClarifyPlatformDetailsAsync(client, instance.ImageId, instance.PlatformDetails);
-            memoryCache.Set($"{EC2InstanceMetadata.InstanceId}_platformDetails", platformDetails, new MemoryCacheEntryOptions());
-        }
-
-        // Describe capacity reservation request to ger capacity reservation preference
-        if ((!memoryCache.TryGetValue($"{EC2InstanceMetadata.InstanceId}_capacityReservationPreference", out string? capacityReservationPreference)
-            || string.IsNullOrEmpty(capacityReservationPreference))
-            && !string.IsNullOrEmpty(instance.CapacityReservationId))
+        // Fetch optional purchase option details
+        string? capacityReservationPreference = null;
+        if (!string.IsNullOrEmpty(instance.CapacityReservationId))
         {
             capacityReservationPreference = await DescribeCapacityReservationsApiCall(client, instance);
-            memoryCache.Set($"{EC2InstanceMetadata.InstanceId}_capacityReservationPreference", new MemoryCacheEntryOptions());
         }
+        string? fleetId = await GetFleetIdApiCall(client, instance);
 
-        // Describe fleets request to get the fleet id
-        if (!memoryCache.TryGetValue($"{EC2InstanceMetadata.InstanceId}_fleetId", out string? fleetId)
-            || string.IsNullOrEmpty(fleetId))
-        {
-            fleetId = await GetFleetIdApiCall(client, instance);
-            memoryCache.Set($"{EC2InstanceMetadata.InstanceId}_fleetId", fleetId, new MemoryCacheEntryOptions());
-        }
-
-        // Core attributes
+        // Build the attributes dictionary using OpenTelemetry semantic conventions
         var resultingAttributes = new Dictionary<string, object>
         {
-            ["aws.ec2.instance_id"] = instance.InstanceId,
-            ["aws.ec2.instance_type"] = instance.InstanceType.Value,
-            ["aws.region"] = regionName,
-            ["aws.ec2.platform_details"] = platformDetails,
-            ["aws.ec2.license_model"] = instance.Licenses is null || instance.Licenses.Count == 0 ? "No License required" : "Bring your own license",
+            // Required: Identifies this as an EC2 instance
+            ["cloud.platform"] = "aws_ec2",
+
+            // Required: Instance identification (semantic conventions)
+            ["host.id"] = instance.InstanceId,
+            ["host.type"] = instance.InstanceType.Value,
+            ["cloud.region"] = regionName,
+
+            // Required: The operating system type derived from platform details
+            ["os.type"] = GetOsType(instance.PlatformDetails),
+
+            // Optional but included here to demonstrate: license model
+            // If omitted, the pricing system defaults to "No License required"
+            ["aws.ec2.license_model"] = instance.Licenses is null || instance.Licenses.Count == 0
+                ? "No License required"
+                : "Bring your own license",
+
+            // Optional but included here to demonstrate: tenancy
+            // If omitted, the pricing system defaults to "shared"
+            // Note: AWS returns "default" which Beakpoint Insights's pricing system treats as equivalent to "shared"
             ["aws.ec2.tenancy"] = instance.Placement.Tenancy.Value
         };
 
-        // Purchase option determining attributes
-        if (instance.InstanceLifecycle is not null) resultingAttributes.Add("aws.ec2.instance_lifecycle", instance.InstanceLifecycle.Value);
-        if (instance.CapacityReservationId is not null) resultingAttributes.Add("aws.ec2.capacity_reservation_id", instance.CapacityReservationId);
-        if (capacityReservationPreference is not null) resultingAttributes.Add("aws.ec2.capacity_reservation_preference", capacityReservationPreference);
-        if (fleetId is not null) resultingAttributes.Add("aws.ec2.fleet_id", fleetId);
-        
+        // Only include platform_details for non-default platforms
+        // Default platforms ("Linux/UNIX" and "Windows") don't need this attribute
+        if (ShouldIncludePlatformDetails(instance.PlatformDetails))
+        {
+            resultingAttributes["aws.ec2.platform_details"] = instance.PlatformDetails;
+        }
+
+        // Purchase option determining attributes (only included when applicable)
+        if (instance.InstanceLifecycle is not null)
+            resultingAttributes.Add("aws.ec2.instance_lifecycle", instance.InstanceLifecycle.Value);
+        if (instance.CapacityReservationId is not null)
+            resultingAttributes.Add("aws.ec2.capacity_reservation_id", instance.CapacityReservationId);
+        if (capacityReservationPreference is not null)
+            resultingAttributes.Add("aws.ec2.capacity_reservation_preference", capacityReservationPreference);
+        if (fleetId is not null)
+            resultingAttributes.Add("aws.ec2.fleet_id", fleetId);
+
         return resultingAttributes;
     }
 
@@ -182,74 +192,47 @@ public static class Program {
     private static async Task<Instance> DescribeInstancesApiCall(AmazonEC2Client client, string instanceId)
     {
         DescribeInstancesRequest request = string.IsNullOrWhiteSpace(EC2InstanceMetadata.InstanceId)
-        ? new DescribeInstancesRequest()
-        : new DescribeInstancesRequest { InstanceIds = [instanceId] };
+            ? new DescribeInstancesRequest()
+            : new DescribeInstancesRequest { InstanceIds = [instanceId] };
 
         DescribeInstancesResponse? response = await client.DescribeInstancesAsync(request);
 
-        if (response.Reservations.Count == 0)
-        {
-            var message = string.IsNullOrWhiteSpace(EC2InstanceMetadata.InstanceId)
-                ? "No EC2 instances found in the account"
-                : $"EC2 instance with id '{EC2InstanceMetadata.InstanceId}' not found";
+        if (response.Reservations.Count != 0)
+            return response.Reservations.First().Instances.First();
+        
+        var message = string.IsNullOrWhiteSpace(EC2InstanceMetadata.InstanceId)
+            ? "No EC2 instances found in the account"
+            : $"EC2 instance with id '{EC2InstanceMetadata.InstanceId}' not found";
 
-            throw new InvalidOperationException(message);
-        }
-
-        return response.Reservations.First().Instances.First();
+        throw new InvalidOperationException(message);
     }
 
     /// <summary>
-    /// Clarifies the platform details of an EC2 instance by including the underlying OS if the platform details do not already include the OS.
-    /// If the platform details do not contain the OS, the function makes a DescribeImages API call to get the OS and then returns a string in the following format: [OS] with [original platform details].
-    /// If the platform details do contain the OS, the function returns the original platform details.
+    /// Derives the `os.type` attribute value from AWS platform details.
+    /// Returns "windows" if the platform details contain "Windows" (case-insensitive),
+    /// otherwise returns "linux".
     /// </summary>
-    /// <param name="client">The AmazonEC2Client to use for the request.</param>
-    /// <param name="imageId">The EC2 image id to filter by.</param>
-    /// <param name="memoryCache">The IMemoryCache to use for caching the response.</param>
-    /// <param name="originalPlatformDetails">The original platform details as returned by the DescribeInstances API call.</param>
-    /// <returns>The platform details with the OS included if it was not already included.</returns>
-    private static async Task<string> ClarifyPlatformDetailsAsync(AmazonEC2Client client, string imageId, string originalPlatformDetails)
+    /// <param name="platformDetails">The platform details string from AWS (e.g., "Linux/UNIX", "Windows", "Red Hat Enterprise Linux").</param>
+    /// <returns>"windows" or "linux"</returns>
+    private static string GetOsType(string platformDetails)
     {
-        string[] platformDetailsWithoutOs = 
-        [
-            "SQL Server Standard",
-            "SQL Server Enterprise",
-            "SQL Server Web"
-        ];
+        return platformDetails.Contains("Windows", StringComparison.OrdinalIgnoreCase)
+            ? "windows"
+            : "linux";
+    }
 
-        if (platformDetailsWithoutOs.Contains(originalPlatformDetails))
-        {
-            if (!string.IsNullOrEmpty(imageId))
-            {
-                DescribeImagesRequest describeImagesRequest = new DescribeImagesRequest
-                {
-                    ImageIds = [imageId]
-                };
-                DescribeImagesResponse? describeImagesResponse = await client.DescribeImagesAsync(describeImagesRequest);
-                if (describeImagesResponse.Images.Count > 0)
-                {
-                    Image? image = describeImagesResponse.Images[0];
-                    var name = image.Name?.ToLower() ?? "";
-                    var description = image.Description?.ToLower() ?? "";
-                    var imagePlatformDetails = image.PlatformDetails ?? originalPlatformDetails;
-
-                    if (originalPlatformDetails.StartsWith("SQL Server"))
-                    {
-                        if (name.Contains("amzn") || description.Contains("amazon linux"))
-                            return "Amazon Linux 2 with " + originalPlatformDetails;
-                        if (name.Contains("windows") || description.Contains("windows"))
-                            return "Windows with " + originalPlatformDetails;
-                        if (name.Contains("ubuntu") || description.Contains("ubuntu"))
-                            return "Ubuntu with " + originalPlatformDetails;
-                        if (name.Contains("rhel") || description.Contains("rhel") || name.Contains("red hat") || description.Contains("red hat"))
-                            return "Red Hat Enterprise Linux with " + originalPlatformDetails;
-                    }
-                    return imagePlatformDetails;
-                }
-            }
-        }
-        return originalPlatformDetails;
+    /// <summary>
+    /// Determines whether the aws.ec2.platform_details attribute should be included.
+    /// Returns false for basic platforms ("Linux/UNIX" or "Windows") where the default is enough.
+    /// Returns true for all other platforms (RHEL, SUSE, Ubuntu Pro, SQL Server variants, etc.)
+    /// where explicit platform details are needed for accurate pricing.
+    /// </summary>
+    /// <param name="platformDetails">The platform details string from AWS.</param>
+    /// <returns>True if platform_details should be included in the attributes, false otherwise.</returns>
+    /// <see href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/billing-info-fields.html">Read more about the different platform details that AWS may set.</see>
+    private static bool ShouldIncludePlatformDetails(string platformDetails)
+    {
+        return platformDetails != "Linux/UNIX" && platformDetails != "Windows";
     }
 
     /// <summary>
@@ -265,20 +248,21 @@ public static class Program {
     {
         string? capacityReservationPreference = null;
 
-        if (!string.IsNullOrEmpty(instance.CapacityReservationId))
+        if (string.IsNullOrEmpty(instance.CapacityReservationId)) return capacityReservationPreference;
+            
+        DescribeCapacityReservationsRequest capacityReservationRequest = new DescribeCapacityReservationsRequest
         {
-            DescribeCapacityReservationsRequest capacityReservationRequest = new DescribeCapacityReservationsRequest
-            {
-                CapacityReservationIds = [instance.CapacityReservationId]
-            };
-            DescribeCapacityReservationsResponse? capacityReservationResponse = await client.DescribeCapacityReservationsAsync(capacityReservationRequest);
-            if (capacityReservationResponse.CapacityReservations.Count > 0)
-            {
-                // Assume preference based on reservation usage (simplified; "open" if available, "none" if not)
-                capacityReservationPreference = capacityReservationResponse.CapacityReservations[0].AvailableInstanceCount > 0
-                    ? "open"
-                    : null;
-            }
+            CapacityReservationIds = [instance.CapacityReservationId]
+        };
+        
+        DescribeCapacityReservationsResponse? capacityReservationResponse = await client.DescribeCapacityReservationsAsync(capacityReservationRequest);
+        
+        if (capacityReservationResponse.CapacityReservations.Count > 0)
+        {
+            // Assume preference based on reservation usage (simplified; "open" if available, "none" if not)
+            capacityReservationPreference = capacityReservationResponse.CapacityReservations[0].AvailableInstanceCount > 0
+                ? "open"
+                : null;
         }
 
         return capacityReservationPreference;
@@ -301,22 +285,24 @@ public static class Program {
         Console.WriteLine($"Fleets found: {fleetResponse.Fleets is not null}");
         Console.WriteLine($"Fleets found: {fleetResponse.Fleets}");
 
-        if (fleetResponse.Fleets != null && fleetResponse.Fleets.Count != 0)
+        if (fleetResponse.Fleets == null || fleetResponse.Fleets.Count == 0)
+            return fleetId;
+        
+        Console.WriteLine($"Fleets found: {fleetResponse.Fleets.Count}\nFirst fleet ID: {fleetResponse.Fleets[0].FleetId}");
+        
+        foreach (FleetData? fleet in fleetResponse.Fleets)
         {
-            Console.WriteLine($"Fleets found: {fleetResponse.Fleets.Count}\nFirst fleet ID: {fleetResponse.Fleets[0].FleetId}");
-            foreach (FleetData? fleet in fleetResponse.Fleets)
+            DescribeFleetInstancesRequest fleetInstancesRequest = new DescribeFleetInstancesRequest
             {
-                DescribeFleetInstancesRequest fleetInstancesRequest = new DescribeFleetInstancesRequest
-                {
-                    FleetId = fleet.FleetId
-                };
-                DescribeFleetInstancesResponse? fleetInstancesResponse = await client.DescribeFleetInstancesAsync(fleetInstancesRequest);
-                if (fleetInstancesResponse.ActiveInstances.Any(i => i.InstanceId == instance.InstanceId))
-                {
-                    fleetId = fleet.FleetId;
-                    break;
-                }
-            }
+                FleetId = fleet.FleetId
+            };
+            
+            DescribeFleetInstancesResponse? fleetInstancesResponse = await client.DescribeFleetInstancesAsync(fleetInstancesRequest);
+
+            if (fleetInstancesResponse.ActiveInstances.All(i => i.InstanceId != instance.InstanceId))
+                continue;
+            
+            fleetId = fleet.FleetId;
         }
 
         return fleetId;
