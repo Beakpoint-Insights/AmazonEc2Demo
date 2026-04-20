@@ -1,11 +1,11 @@
-name: svc-lambda-ec2-trace-generator
+name: demo-amazon-ec2
 id: 'ari:cloud:compass:5fce4cfe-d9f7-426b-a473-fb0e6f7431df:component/da63e7b3-f9d2-4bf1-9d94-b41c639cd631/016ee01f-6e0b-488b-84a6-2c58f9112c0f'
-description: 'EC2-metadata-carrying trace generator. Sibling to svc-lambda-trace-generator, deployed to our AWS account.'
+description: '.NET example showing how to send traces to Beakpoint Insights with metadata for calculating EC2 instance cost. Customer-facing teaching artifact; not part of our runtime stack.'
 configVersion: 1
-typeId: SERVICE
+typeId: APPLICATION
 ownerId: 'ari:cloud:identity::team/540658de-11e8-46ee-a34c-63cce31a6d9d'
 fields:
-  tier: 4
+  tier: 3
   lifecycle: 'Active'
 links:
   - name: 'AmazonEc2Demo'
